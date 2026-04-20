@@ -10,6 +10,6 @@ public class AppointmentDetailsDto
     public string PatientEmail { get; set; } = string.Empty;
     public string PatientPhone { get; set; } = string.Empty;
     public string DoctorLicenseNumber { get; set; } = string.Empty;
-    public string? InternalNotes { get; set; } = string.Empty;
+    public string? InternalNotes { get; set; }
     public DateTime AppointmentCreation { get; set; }
 }

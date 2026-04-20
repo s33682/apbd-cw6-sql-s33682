@@ -117,4 +117,177 @@ public class AppointmentsController : ControllerBase
         
         return Ok(appointment);
     }
+
+    [HttpPost]
+    public async Task<IActionResult> CreateAppointment(CreateAppointmentRequestDto appointment)
+    {
+        if (appointment.AppointmentDate < DateTime.Now || String.IsNullOrEmpty(appointment.Reason) || appointment.Reason.Length > 250)
+        {
+            return BadRequest();
+        }
+
+        var DefaultConnection = _config.GetConnectionString("DefaultConnection");
+
+        await using var conn = new SqlConnection(DefaultConnection);
+
+        await conn.OpenAsync();
+
+        await using var command = new SqlCommand("""
+                                                 SELECT COUNT(1) FROM dbo.Doctors d
+                                                 WHERE (@IdDoctor IS NULL OR d.IdDoctor = @IdDoctor)
+                                                 AND IsActive = 1
+                                                 """, conn);
+        
+        command.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = appointment.IdDoctor;
+
+        var result = await command.ExecuteScalarAsync();
+
+        if ((int)result == 0)
+        {
+            return BadRequest();
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              SELECT COUNT(1) FROM dbo.Appointments a
+                              WHERE  (@AppointmentDate IS NULL OR a.AppointmentDate = @AppointmentDate)
+                              AND (@IdDoctor IS NULL OR a.IdDoctor = @IdDoctor)
+                              """;
+        
+        command.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = appointment.AppointmentDate;
+        command.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = appointment.IdDoctor;
+
+        result = await command.ExecuteScalarAsync();
+
+        if ((int)result > 0)
+        {
+            return Conflict();
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              INSERT INTO dbo.Appointments (IdPatient, IdDoctor, AppointmentDate, Reason, Status) 
+                              OUTPUT INSERTED.IdAppointment
+                              VALUES (@IdPatient, @IdDoctor, @AppointmentDate, @Reason, N'Scheduled');
+                              """;
+
+        command.Parameters.Add("@IdPatient", SqlDbType.Int).Value = appointment.IdPatient;
+        command.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = appointment.IdDoctor;
+        command.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = appointment.AppointmentDate;
+        command.Parameters.Add("@Reason", SqlDbType.NVarChar).Value = appointment.Reason;
+
+        result = await command.ExecuteScalarAsync();
+        
+        return CreatedAtAction(nameof(GetAppointment), new {idAppointment = (int) result}, appointment);
+    }
+
+    [HttpPut("{idAppointment}")]
+    public async Task<IActionResult> UpdateAppointment(int idAppointment, UpdateAppointmentRequestDto appointment)
+    {
+        if (appointment.Status != "Scheduled" && appointment.Status != "Completed" && appointment.Status != "Cancelled")
+        {
+            return BadRequest();
+        }
+        
+        var DefaultConnection = _config.GetConnectionString("DefaultConnection");
+
+        await using var conn = new SqlConnection(DefaultConnection);
+
+        await conn.OpenAsync();
+
+        await using var command = new SqlCommand("""
+                                                 SELECT COUNT(1) FROM dbo.Doctors d
+                                                 WHERE (@IdDoctor IS NULL OR d.IdDoctor = @IdDoctor)
+                                                 AND IsActive = 1
+                                                 """, conn);
+        
+        command.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = appointment.IdDoctor;
+
+        var result = await command.ExecuteScalarAsync();
+
+        if ((int)result == 0)
+        {
+            return BadRequest();
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              SELECT COUNT(1) FROM dbo.Patients p
+                              WHERE (@IdPatient IS NULL OR p.IdPatient = @IdPatient)
+                              AND IsActive = 1
+                              """;
+        
+        command.Parameters.Add("@IdPatient", SqlDbType.Int).Value = appointment.IdPatient;
+
+        result = await command.ExecuteScalarAsync();
+
+        if ((int)result == 0)
+        {
+            return BadRequest();
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              SELECT * FROM dbo.Appointments a
+                              WHERE (@IdAppointment IS NULL OR a.IdAppointment = @IdAppointment)
+                              """;
+        
+        command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+        
+        var result2 = await command.ExecuteReaderAsync();
+
+        if (!await result2.ReadAsync())
+        {
+            return NotFound();
+        }
+
+        if ( (string)result2["Status"] == "Completed")
+        {
+            appointment.AppointmentDate = (DateTime) result2["AppointmentDate"];
+        }
+        await result2.CloseAsync();
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              SELECT Count(1) FROM dbo.Appointments a
+                              WHERE (@IdDoctor IS NULL OR a.IdDoctor = @IdDoctor)
+                              AND (@AppointmentDate IS NULL OR a.AppointmentDate = @AppointmentDate)
+                              AND a.IdAppointment != @IdAppointment
+                              """;
+        
+        command.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = appointment.IdDoctor;
+        command.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = appointment.AppointmentDate;
+        command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+
+        result = await command.ExecuteScalarAsync();
+
+        if ((int)result > 0)
+        {
+            return Conflict();
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              UPDATE dbo.Appointments
+                              SET IdPatient = @IdPatient,
+                                  IdDoctor = @IdDoctor,
+                                  AppointmentDate = @AppointmentDate,
+                                  Status = @Status,
+                                  Reason = @Reason,
+                                  InternalNotes = @InternalNotes
+                              WHERE IdAppointment = @IdAppointment;
+                              """;
+        
+        command.Parameters.Add("@IdPatient", SqlDbType.Int).Value = appointment.IdPatient;
+        command.Parameters.Add("@IdDoctor", SqlDbType.Int).Value = appointment.IdDoctor;
+        command.Parameters.Add("@AppointmentDate", SqlDbType.DateTime2).Value = appointment.AppointmentDate;
+        command.Parameters.Add("@Status", SqlDbType.NVarChar).Value = appointment.Status;
+        command.Parameters.Add("@Reason", SqlDbType.NVarChar).Value = appointment.Reason;
+        command.Parameters.Add("@InternalNotes", SqlDbType.NVarChar).Value = appointment.InternalNotes ?? (object)DBNull.Value;
+        command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+        
+        await command.ExecuteNonQueryAsync();
+        
+        return NoContent();
+    }
 }
