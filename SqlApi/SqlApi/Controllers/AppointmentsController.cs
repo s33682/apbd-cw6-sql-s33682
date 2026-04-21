@@ -43,7 +43,7 @@ public class AppointmentsController : ControllerBase
         command.Parameters.Add("@Status", SqlDbType.VarChar).Value = status ?? (object) DBNull.Value;
         command.Parameters.Add("@PatientLastName", SqlDbType.VarChar).Value = patientLastName ?? (object) DBNull.Value;
 
-        var result = await command.ExecuteReaderAsync();
+        await using var result = await command.ExecuteReaderAsync();
 
         var appointments = new List<AppointmentListDto>();
 
@@ -94,11 +94,11 @@ public class AppointmentsController : ControllerBase
         
         command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
 
-        var result = await command.ExecuteReaderAsync();
+        await using var result = await command.ExecuteReaderAsync();
 
         if (await result.ReadAsync() == false)
         {
-            return NotFound();
+            return NotFound(new ErrorResponseDto{ErrorMsg = "Nie istnieje wizyta o podanym ID!"});
         }
 
         var appointment = new AppointmentDetailsDto
@@ -123,7 +123,7 @@ public class AppointmentsController : ControllerBase
     {
         if (appointment.AppointmentDate < DateTime.Now || String.IsNullOrEmpty(appointment.Reason) || appointment.Reason.Length > 250)
         {
-            return BadRequest();
+            return BadRequest(new ErrorResponseDto{ErrorMsg = "Nie można stworzyć wizyty z datą wstecz, pustym lub za długim (Max: 250 znaków) powodem!"});
         }
 
         var DefaultConnection = _config.GetConnectionString("DefaultConnection");
@@ -144,7 +144,23 @@ public class AppointmentsController : ControllerBase
 
         if ((int)result == 0)
         {
-            return BadRequest();
+            return BadRequest(new ErrorResponseDto{ErrorMsg = "Podany lekarz nie istnieje lub jest nieaktywny!"});
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                              SELECT COUNT(1) FROM dbo.Patients p
+                              WHERE (@IdPatient IS NULL OR p.IdPatient = @IdPatient)
+                              AND IsActive = 1
+                              """;
+        
+        command.Parameters.Add("@IdPatient", SqlDbType.Int).Value = appointment.IdPatient;
+
+        result = await command.ExecuteScalarAsync();
+
+        if ((int)result == 0)
+        {
+            return BadRequest(new ErrorResponseDto{ErrorMsg = "Podany pacjent nie istnieje lub jest nieaktywny!"});
         }
         
         command.Parameters.Clear();
@@ -161,7 +177,7 @@ public class AppointmentsController : ControllerBase
 
         if ((int)result > 0)
         {
-            return Conflict();
+            return Conflict(new ErrorResponseDto{ErrorMsg = "Podany termin jest zajęty przez inną wizytę!"});
         }
         
         command.Parameters.Clear();
@@ -186,7 +202,7 @@ public class AppointmentsController : ControllerBase
     {
         if (appointment.Status != "Scheduled" && appointment.Status != "Completed" && appointment.Status != "Cancelled")
         {
-            return BadRequest();
+            return BadRequest(new ErrorResponseDto{ErrorMsg = "Niepoprawny status! (Scheduled, Completed, Cancelled)"});
         }
         
         var DefaultConnection = _config.GetConnectionString("DefaultConnection");
@@ -207,7 +223,7 @@ public class AppointmentsController : ControllerBase
 
         if ((int)result == 0)
         {
-            return BadRequest();
+            return BadRequest(new ErrorResponseDto{ErrorMsg = "Podany lekarz nie istnieje lub jest nieaktywny!"});
         }
         
         command.Parameters.Clear();
@@ -223,7 +239,7 @@ public class AppointmentsController : ControllerBase
 
         if ((int)result == 0)
         {
-            return BadRequest();
+            return BadRequest(new ErrorResponseDto{ErrorMsg = "Podany pacjent nie istnieje lub jest nieaktywny!"});
         }
         
         command.Parameters.Clear();
@@ -233,19 +249,19 @@ public class AppointmentsController : ControllerBase
                               """;
         
         command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
-        
-        var result2 = await command.ExecuteReaderAsync();
 
-        if (!await result2.ReadAsync())
+        await using (var result2 = await command.ExecuteReaderAsync())
         {
-            return NotFound();
-        }
+            if (!await result2.ReadAsync())
+            {
+                return NotFound(new ErrorResponseDto{ErrorMsg = "Nie istnieje wizyta o podanym ID!"});
+            }
 
-        if ( (string)result2["Status"] == "Completed")
-        {
-            appointment.AppointmentDate = (DateTime) result2["AppointmentDate"];
+            if ( (string)result2["Status"] == "Completed")
+            {
+                appointment.AppointmentDate = (DateTime) result2["AppointmentDate"];
+            }
         }
-        await result2.CloseAsync();
         
         command.Parameters.Clear();
         command.CommandText = """
@@ -263,7 +279,7 @@ public class AppointmentsController : ControllerBase
 
         if ((int)result > 0)
         {
-            return Conflict();
+            return Conflict(new ErrorResponseDto{ErrorMsg = "Podany termin jest zajęty przez inną wizytę!"});
         }
         
         command.Parameters.Clear();
@@ -286,6 +302,48 @@ public class AppointmentsController : ControllerBase
         command.Parameters.Add("@InternalNotes", SqlDbType.NVarChar).Value = appointment.InternalNotes ?? (object)DBNull.Value;
         command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
         
+        await command.ExecuteNonQueryAsync();
+        
+        return Ok(appointment);
+    }
+
+    [HttpDelete("{idAppointment}")]
+    public async Task<IActionResult> DeleteAppointment(int idAppointment)
+    {
+        var DefaultConnection = _config.GetConnectionString("DefaultConnection");
+
+        await using var conn = new SqlConnection(DefaultConnection);
+
+        await conn.OpenAsync();
+
+        await using var command = new SqlCommand("""
+                                                 SELECT * FROM dbo.Appointments a
+                                                 WHERE (@IdAppointment IS NULL OR a.IdAppointment = @IdAppointment)
+                                                 """, conn);
+        
+        command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+
+        await using (var result = await command.ExecuteReaderAsync())
+        {
+            if (!await result.ReadAsync())
+            {
+                return NotFound(new ErrorResponseDto{ErrorMsg = "Nie istnieje wizyta o podanym ID!"});
+            }
+
+            if ((string)result["Status"] == "Completed")
+            {
+                return Conflict(new ErrorResponseDto{ErrorMsg = "Nie można usunąć wizyty ze statusem Completed!"});
+            }
+        }
+        
+        command.Parameters.Clear();
+        command.CommandText = """
+                                DELETE FROM dbo.Appointments
+                                WHERE  IdAppointment = @IdAppointment;
+                              """;
+
+        command.Parameters.Add("@IdAppointment", SqlDbType.Int).Value = idAppointment;
+
         await command.ExecuteNonQueryAsync();
         
         return NoContent();
